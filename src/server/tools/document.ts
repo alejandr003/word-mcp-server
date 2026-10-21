@@ -62,7 +62,7 @@ export function registerDocumentTools(
 
   regTool("word_document",
     {
-      description: "WHEN: need to switch to an already-open document, open an existing file, or create an untitled document. WHAT: if path is provided and file exists, opens it; if already open, switches to it. If no path, creates/reuses an untitled document. CONSTRAINT: preferred over word_open which forces a new window. Error if path does not exist on disk.",
+      description: "WHEN: need to switch to an already-open document, open an existing file, or create an untitled document. WHAT: if path is provided and file exists, opens it; if already open (including OneDrive/SharePoint copies), activates that window instead of opening a duplicate. If no path, creates/reuses an untitled document. CONSTRAINT: preferred over word_open. Error if path does not exist on disk.",
       inputSchema: {
         path: z.string().min(1).max(4096).optional().describe("Path to an existing .docx file. Omit to create an untitled document or reuse the active one."),
         title: z.string().max(255).optional().describe("Document title shown in Word title bar (used only when creating untitled doc with no path)"),
@@ -82,7 +82,7 @@ export function registerDocumentTools(
 
   regTool("word_open",
     {
-      description: "WHEN: need to open a file that is not already tracked by the session, forcing a fresh window. WHAT: opens an existing .docx file from disk in a new Word window. CONSTRAINT: always creates a new window. Use word_document instead for smart switching (preferred in most cases). File must exist on disk.",
+      description: "WHEN: need to open a .docx file from disk. WHAT: opens the file, or activates it if that document is already open in Word (no duplicate window). CONSTRAINT: file must exist on disk. word_document is the preferred general-purpose tool; word_open is equivalent but focused on opening from disk.",
       inputSchema: {
         path: z.string().min(1).max(4096).describe("Full path to the .docx file to open in a new Word window"),
       },

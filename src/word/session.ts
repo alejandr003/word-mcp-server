@@ -1,4 +1,4 @@
-import { exec } from "node:child_process"
+import { exec, execSync } from "node:child_process"
 import { readdirSync, statSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
 import { createRequire } from "node:module"
@@ -13,7 +13,12 @@ import type { ILogger } from "../logger.js"
 const require = createRequire(import.meta.url)
 
 interface WinaxModule {
-  Object: new (progid: string) => Record<string, unknown>
+  Object: new (progid: string, options?: { activate?: boolean }) => Record<string, unknown>
+}
+
+export interface WordSessionOptions {
+  /** Returns the PIDs of running WINWORD.EXE processes. Injected in tests. */
+  listWinwordPids?: () => number[]
 }
 
 export interface IWordSession {
@@ -26,6 +31,10 @@ export interface IWordSession {
   ensureAlive(): void
   isAlive(): boolean
   start(): void
+  /** Attach to an already-running Word instance. Never creates a new process. */
+  attachIfRunning(): boolean
+  /** Release the COM reference without closing documents or quitting Word. */
+  release(): void
   quit(): void
   setLogger(logger: ILogger): void
   setScreenUpdating(on: boolean): void
@@ -61,6 +70,22 @@ function isTransientComError(err: unknown): boolean {
   return typeof code === "number" && TRANSIENT_HRESULTS.has(code)
 }
 
+const WINWORD_PID_SCRIPT =
+  'tasklist /FI "IMAGENAME eq WINWORD.EXE" /FO CSV /NH'
+
+function listWinwordPids(): number[] {
+  try {
+    const out = execSync(WINWORD_PID_SCRIPT, {
+      encoding: "utf-8",
+      timeout: 5000,
+      windowsHide: true,
+    })
+    return Array.from(out.matchAll(/"WINWORD\.EXE","(\d+)"/gi)).map(m => Number(m[1]))
+  } catch {
+    return []
+  }
+}
+
 export class WordSession implements IWordSession {
   private word: Record<string, unknown> | null = null
   private _activeDoc: Record<string, unknown> | null = null
@@ -75,9 +100,15 @@ export class WordSession implements IWordSession {
   private _docProxy: IDocumentProxy | null = null
   private _selProxy: ISelectionProxy | null = null
   private _rangeProxyCache = new WeakMap<Record<string, unknown>, IRangeProxy>()
+  /** True when this session created the WINWORD.EXE process (safe to kill). */
+  private _ownsProcess = false
+  /** PID of the process this session created, when known. */
+  private _pid: string | undefined
+  private _listWinwordPids: () => number[]
 
-  constructor(winaxLoader?: () => WinaxModule) {
+  constructor(winaxLoader?: () => WinaxModule, options?: WordSessionOptions) {
     this.monitor = new ProcessMonitor(3000)
+    this._listWinwordPids = options?.listWinwordPids ?? listWinwordPids
     if (winaxLoader) this._winaxMod = winaxLoader()
   }
 
@@ -158,9 +189,22 @@ export class WordSession implements IWordSession {
   start(): void {
     if (this.word) return
     this._cleanupRecoveryFiles()
-    this._logger?.info("Creating Word.Application via winax")
+    const before = this._listWinwordPids()
+    this._logger?.info("Attaching to Word.Application via winax (activate-first)")
     const winaxMod = this.getWinax()
-    const app = new winaxMod.Object("Word.Application") as Record<string, unknown>
+    // `activate: true` asks winax to use GetActiveObject first and only create a
+    // new instance if no Word is running. Without it every MCP restart spawned a
+    // fresh WINWORD.EXE and the user's open document became invisible to the MCP.
+    const app = new winaxMod.Object("Word.Application", { activate: true }) as Record<string, unknown>
+    const after = this._listWinwordPids()
+    const spawned = after.filter(pid => !before.includes(pid))
+    this._ownsProcess = spawned.length > 0
+    this._pid = spawned.length > 0 ? String(spawned[0]) : undefined
+    this._logger?.info(
+      this._ownsProcess
+        ? `Started new WINWORD.EXE (PID: ${this._pid})`
+        : "Attached to the Word instance already running",
+    )
     app.AutomationSecurity = 3
     app.DisplayAlerts = 0
     try { ;(app as any).ShowStartupDialog = false } catch { /* Word 2013+ only */ }
@@ -168,8 +212,30 @@ export class WordSession implements IWordSession {
     this.word = app
     this.lockPrintView()
     this.monitor.start()
+    this.monitor.markAlive()
     this._unhealthy = false
-    this._logger?.info("Word.Application created successfully")
+    // If Word was already open, adopt whatever document the user has in front.
+    this.tryAdoptActiveDoc()
+    this._logger?.info("Word.Application ready")
+  }
+
+  attachIfRunning(): boolean {
+    if (this.word) return this.isAlive()
+    if (this._listWinwordPids().length === 0) return false
+    try {
+      this.start()
+    } catch (e) {
+      this._logger?.warn(`Attach to running Word failed: ${e}`)
+      return false
+    }
+    if (this._ownsProcess) {
+      // GetActiveObject failed and winax fell back to creating a process. Do not
+      // leave an empty automation instance behind for a read-only operation.
+      this._logger?.warn("No attachable Word instance found — discarding the one just created")
+      this.quit()
+      return false
+    }
+    return this.word !== null
   }
 
   ensureAlive(): void {
@@ -228,6 +294,21 @@ export class WordSession implements IWordSession {
     return this._lastCallStart
   }
 
+  release(): void {
+    this.monitor.stop()
+    if (this.word) {
+      try { ;(this.word.Release as () => void)() } catch { /* ignore */ }
+    }
+    this.word = null
+    this._activeDoc = null
+    this._activeDocPath = null
+    this._docProxy = null
+    this._selProxy = null
+    this._rangeProxyCache = new WeakMap()
+    this._ownsProcess = false
+    this._pid = undefined
+  }
+
   quit(): void {
     this.monitor.stop()
 
@@ -264,8 +345,9 @@ export class WordSession implements IWordSession {
       this._rangeProxyCache = new WeakMap()
     }
 
-    // Fallback: kill by PID if process still running
-    const pid = this.monitor.getPid()
+    // Fallback: kill by PID only when this session owns the process. Killing an
+    // arbitrary WINWORD.EXE would close the user's own open documents.
+    const pid = this._ownsProcess ? this._pid : undefined
     if (pid) {
       try {
         exec(`taskkill /PID ${pid} /F /T`, { timeout: 5000 })
@@ -274,6 +356,8 @@ export class WordSession implements IWordSession {
         // process already dead — ignore
       }
     }
+    this._ownsProcess = false
+    this._pid = undefined
   }
 
   healthCheck(): boolean {
@@ -287,6 +371,8 @@ export class WordSession implements IWordSession {
     if (!this.monitor.isAlive()) {
       this._logger?.warn("Process-level check: WINWORD.EXE not found — stale COM proxy")
       this.word = null
+      this._ownsProcess = false
+      this._pid = undefined
       this._unhealthy = true
       return false
     }
@@ -301,21 +387,25 @@ export class WordSession implements IWordSession {
     this._busy = true
     this._logger?.info("Starting Word session recovery...")
 
-    // 1. 先记录 PID，用于强制杀进程（必须在清空 word 之前获取）
-    const pid = this.monitor.getPid()
+    // 1. 只杀本会话自己创建的进程。附加到用户已有的 Word 时绝不杀，
+    //    否则会丢失用户未保存的文档。
+    const pid = this._ownsProcess ? this._pid : undefined
 
     // 2. 清理内存状态（不做 COM 操作）
     const oldWord = this.word
     this.word = null
     this._activeDoc = null
     this._activeDocPath = null
+    this._docProxy = null
+    this._selProxy = null
+    this._rangeProxyCache = new WeakMap()
 
     // 3. 释放 COM 引用（尽力，不阻塞）
     if (oldWord) {
       try { ;(oldWord.Release as () => void)() } catch { /* ignore */ }
     }
 
-    // 4. 强制杀进程 — taskkill 比 oldWord.Quit() 更可靠（弹窗也能杀掉）
+    // 4. 强制杀进程 — 仅限本会话创建的实例
     if (pid) {
       try {
         await new Promise<void>((resolve, reject) => {
@@ -329,6 +419,8 @@ export class WordSession implements IWordSession {
         this._logger?.warn(`taskkill for PID ${pid} failed (may already be dead)`)
       }
     }
+    this._ownsProcess = false
+    this._pid = undefined
 
     // 5. 等待进程完全退出
     if (pid && this.monitor.lastCheckTime() > 0) {

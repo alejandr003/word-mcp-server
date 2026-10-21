@@ -79,4 +79,31 @@ describe("PathSanitizer", () => {
     const s = new PathSanitizer({ ...defaultPolicy, maxFileSize: 1 })
     expect(() => s.validateForRead(__filename)).toThrow()
   })
+
+  it("should strip matching quotes around a path", () => {
+    const s = new PathSanitizer(defaultPolicy)
+    const result = s.resolveAndValidate('"C:\\Users\\test\\doc.docx"')
+    if (process.platform === "win32") {
+      expect(result).toBe("C:\\Users\\test\\doc.docx")
+    } else {
+      expect(result).not.toContain('"')
+    }
+  })
+
+  it("should expand a leading tilde to the home directory", () => {
+    const s = new PathSanitizer(defaultPolicy)
+    const result = s.resolveAndValidate("~/Documents/doc.docx")
+    expect(result).toContain("Documents")
+    expect(result).not.toContain("~")
+  })
+
+  it("should not allow sibling directories with a shared prefix", () => {
+    const s = new PathSanitizer({
+      ...defaultPolicy,
+      allowedDirectories: ["C:\\Users\\test\\Documents"],
+    })
+    expect(() =>
+      s.resolveAndValidate("C:\\Users\\test\\Documents-other\\file.docx")
+    ).toThrow()
+  })
 })

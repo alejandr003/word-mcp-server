@@ -1,4 +1,5 @@
-import { resolve, normalize, relative, parse } from "node:path"
+import { resolve, normalize, relative, parse, isAbsolute, join, sep } from "node:path"
+import { homedir } from "node:os"
 import { existsSync, statSync } from "node:fs"
 import { PathSecurityError } from "./errors.js"
 
@@ -16,10 +17,11 @@ export class PathSanitizer {
   }
 
   resolveAndValidate(rawPath: string): string {
-    const resolved = resolve(normalize(rawPath.trim()))
+    const expanded = this.expandRawPath(rawPath)
+    const resolved = this.resolveInput(expanded)
 
-    this.rejectIfTraversal(rawPath, resolved)
-    this.rejectIfSpecialDevicePath(rawPath)
+    this.rejectIfTraversal(expanded, resolved)
+    this.rejectIfSpecialDevicePath(expanded)
     this.rejectIfNetworkPath(resolved)
     this.rejectIfBlocklisted(resolved)
 
@@ -28,6 +30,36 @@ export class PathSanitizer {
     }
 
     return resolved
+  }
+
+  /**
+   * Accept the path shapes MCP clients commonly send: surrounding quotes,
+   * `~` for the home directory, and forward slashes.
+   */
+  private expandRawPath(rawPath: string): string {
+    let p = rawPath.trim()
+    if (p.length >= 2) {
+      const first = p[0]
+      const last = p[p.length - 1]
+      if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+        p = p.slice(1, -1).trim()
+      }
+    }
+    if (p === "~") return homedir()
+    if (p.startsWith("~/") || p.startsWith("~\\")) return join(homedir(), p.slice(2))
+    return p
+  }
+
+  private resolveInput(expanded: string): string {
+    const direct = resolve(normalize(expanded))
+    if (isAbsolute(expanded) || existsSync(direct)) return direct
+    // Relative paths are resolved against the server cwd first; if that misses,
+    // try the configured allowed roots so "Documents\\file.docx" still works.
+    for (const dir of this.policy.allowedDirectories) {
+      const candidate = resolve(normalize(dir), expanded)
+      if (existsSync(candidate)) return candidate
+    }
+    return direct
   }
 
   validateForRead(rawPath: string): string {
@@ -106,8 +138,11 @@ export class PathSanitizer {
   }
 
   private rejectIfNotAllowed(resolved: string): void {
-    const allowed = this.policy.allowedDirectories.map((d) => resolve(normalize(d)))
-    const isAllowed = allowed.some((dir) => resolved.startsWith(dir))
+    const target = resolved.toLowerCase().replace(/[\\/]+$/, "")
+    const isAllowed = this.policy.allowedDirectories.some((d) => {
+      const dir = resolve(normalize(d)).toLowerCase().replace(/[\\/]+$/, "")
+      return target === dir || target.startsWith(dir + sep)
+    })
     if (!isAllowed) {
       throw new PathSecurityError(`Path not in allowed directories: ${resolved}`)
     }

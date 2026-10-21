@@ -114,6 +114,8 @@ export function createMockSession(
     ensureAlive: vi.fn(),
     isAlive: () => true,
     start: vi.fn(),
+    attachIfRunning: () => true,
+    release: vi.fn(),
     quit: vi.fn(),
     setOnLog: vi.fn(),
     setScreenUpdating: vi.fn(),

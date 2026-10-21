@@ -4,7 +4,7 @@ import { existsSync, copyFileSync } from "node:fs"
 import type { IWordSession } from "./session.js"
 import { DocumentRegistry } from "./document-registry.js"
 import { WordMcpError } from "../security/errors.js"
-import { normalizePath } from "./types.js"
+import { normalizePath, pathsReferToSameFile } from "./types.js"
 
 const FORMAT_EXT_MAP: Record<string, number> = {
   ".docx": 16, ".doc": 0, ".pdf": 17, ".rtf": 6, ".txt": 2,
@@ -59,8 +59,30 @@ export class WordApplicationManager {
     return this.session.application as Record<string, unknown>
   }
 
+  /**
+   * Access Word for read-only queries without launching a new WINWORD.EXE.
+   * If Word is running but not attached yet, attach to it; otherwise report null.
+   */
   private tryGetWordSafe(): Record<string, unknown> | null {
-    try { return this.session.application } catch { return null }
+    try {
+      if (!this.session.isAlive() && !this.session.attachIfRunning()) return null
+      return this.session.application
+    } catch {
+      return null
+    }
+  }
+
+  /** Bring a document window to the front without opening a second copy. */
+  private activateDocument(doc: Record<string, unknown>): void {
+    try {
+      this.session.comCall(() => {
+        ;(doc.Activate as (() => void) | undefined)?.()
+        const win = doc.ActiveWindow as Record<string, unknown> | undefined
+        ;(win?.Activate as (() => void) | undefined)?.()
+      })
+    } catch {
+      // Activation failing must never abort the operation.
+    }
   }
 
   private getDoc(): Record<string, unknown> {
@@ -96,8 +118,9 @@ export class WordApplicationManager {
       try {
         const raw = (doc.FullName as string) ?? ""
         if (!raw) continue
-        const fp = normalizePath(raw)
-        if (fp === keyPath) return doc
+        // Handles OneDrive/SharePoint documents whose FullName is an https URL
+        // while the caller passes the local synced path.
+        if (normalizePath(raw) === keyPath || pathsReferToSameFile(path, raw)) return doc
       } catch { /* skip stale */ }
     }
     return null
@@ -159,7 +182,9 @@ export class WordApplicationManager {
         path: resolvedPath,
         existsOnDisk: existsSync(resolvedPath),
         isOpenInWord: this.isPathOpenInWord(resolvedPath) !== null,
-        isActive: activeDocument ? normalizePath(activeDocument.fullName) === normalizePath(resolvedPath) : false,
+        isActive: activeDocument
+          ? pathsReferToSameFile(resolvedPath, activeDocument.fullName)
+          : false,
         isTrackedByRegistry: this.registry.isOpen(resolvedPath),
       }
     }
@@ -171,13 +196,8 @@ export class WordApplicationManager {
     if (path) {
       const alreadyOpen = this.isPathOpenInWord(path)
       if (alreadyOpen) {
-        this.session.setActiveDoc(alreadyOpen)
-        this.session.setActiveDocPath(path)
-        if (this.registry.isOpen(path)) {
-          this.registry.setActive(path)
-        } else {
-          this.registry.register(path, alreadyOpen)
-        }
+        this.adoptDocument(path, alreadyOpen)
+        this.activateDocument(alreadyOpen)
         return "reused"
       }
 
@@ -189,15 +209,16 @@ export class WordApplicationManager {
       throw new WordMcpError(
         `File does not exist: "${path}". Use word_stream_start to create a new document, or provide a path to an existing file.`,
         "FILE_NOT_FOUND", false,
-        "Use word_get_status(path) to check available files, or word_stream_start to create a new document."
+        "Check the path with word_get_status(path), or use word_stream_start to create a new document."
       )
     }
 
     if (this.session.activeDoc) {
+      this.activateDocument(this.session.activeDoc)
       return "reused"
     }
 
-    await this.createDocument()
+    await this.createDocument({ title })
     return "created"
   }
 
@@ -257,13 +278,25 @@ export class WordApplicationManager {
   }
 
   async openDocument(path: string): Promise<{ name: string; fullName: string }> {
+    // Word may already have this file open in the same instance (for example
+    // OneDrive documents exposed as a URL). Reuse and focus it instead of
+    // calling Documents.Open again, which creates a second window.
+    const alreadyOpen = this.isPathOpenInWord(path)
+    if (alreadyOpen) {
+      this.adoptDocument(path, alreadyOpen)
+      this.activateDocument(alreadyOpen)
+      return {
+        name: (alreadyOpen.Name as string) ?? path,
+        fullName: (alreadyOpen.FullName as string) ?? path,
+      }
+    }
+
     const existing = this.registry.getByPath(path)
     if (existing) {
       try {
         const _ = (existing.doc as Record<string, unknown>).Name
-        this.registry.setActive(path)
-        this.session.setActiveDoc(existing.doc)
-        this.session.setActiveDocPath(path)
+        this.adoptDocument(path, existing.doc)
+        this.activateDocument(existing.doc)
         return { name: existing.displayName, fullName: existing.path }
       } catch {
         this.registry.unregister(path)
@@ -273,13 +306,12 @@ export class WordApplicationManager {
     try { ;(w as any).Visible = true } catch (e) { this.session.logger?.warn({ err: e }, "Visible=true failed") }
     try { ;(w as Record<string, unknown>).FileValidation = 2 } catch { /* some Word versions lack this */ }
     const doc = this.session.comCall(() => {
-      const docs = w.Documents as { Open: (p: string) => Record<string, unknown> }
-      return docs.Open(path) as Record<string, unknown>
+      const docs = w.Documents as { Open: (p: string, confirm?: boolean, readOnly?: boolean, addToRecent?: boolean) => Record<string, unknown> }
+      return docs.Open(path, false, false, false) as Record<string, unknown>
     })
     try { ;(doc as Record<string, unknown>).AutoUpdate = false } catch { /* ignore */ }
-    this.session.setActiveDoc(doc)
-    this.session.setActiveDocPath(path)
-    this.registry.register(path, doc)
+    this.adoptDocument(path, doc)
+    this.activateDocument(doc)
     return { name: doc.Name as string, fullName: doc.FullName as string }
   }
 
@@ -365,5 +397,14 @@ export class WordApplicationManager {
   async quit(): Promise<void> {
     this.registry.clear()
     this.session.quit()
+  }
+
+  /**
+   * Detach from Word without closing documents or quitting the app. Used when
+   * the MCP server shuts down — the user's open work must survive a restart.
+   */
+  release(): void {
+    this.registry.clear()
+    this.session.release()
   }
 }

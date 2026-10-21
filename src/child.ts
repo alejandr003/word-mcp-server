@@ -19,7 +19,7 @@ const instructions = [
   "1. word_stream_start while doc active → auto-closes existing doc.",
   "2. word_save then word_undo_redo → undo cleared.",
   "3. Format before typing → type first, select, format.",
-  "4. word_open → use word_document (smart switch).",
+  "4. word_document({path}) activates an already-open file; do not retry with word_open.",
   "5. word_find_text + word_go_to_paragraph → find already moves cursor.",
 ].join("\n")
 

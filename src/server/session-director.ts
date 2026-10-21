@@ -152,11 +152,18 @@ export class SessionDirector implements IStreamLock {
         this._log("info", "Clearing stale busy flag")
         session.setBusy(false)
       }
-      if (session.isUnhealthy() || !session.isAlive()) {
+      if (session.isUnhealthy()) {
         try {
           await session.recover()
           this._circuitBreaker.forceReset()
         } catch (e) { this._logger?.warn({ err: e }, "precheck recovery failed") }
+      } else if (!session.isAlive()) {
+        try {
+          // Read-only tools must not launch Word. Attach to an already-running
+          // instance when possible; other tools force a start (attach-first).
+          if (isReadOnlyTool(toolName)) session.attachIfRunning()
+          else session.start()
+        } catch (e) { this._logger?.warn({ err: e }, "precheck session start failed") }
       }
     }
 
@@ -190,6 +197,10 @@ export class SessionDirector implements IStreamLock {
     }
     if (p === "DOC" && !session.activeDoc) {
       try {
+        // Do not spawn Word just to check a precondition.
+        if (!session.isAlive() && !session.attachIfRunning()) {
+          return "[NO_DOCUMENT] Microsoft Word is not running.\n>> Recovery: Use word_document({path:'...'}) to open a file, or word_stream_start({title:'...'}) to create a new document."
+        }
         if (session.tryAdoptActiveDoc()) {
           const doc = session.activeDoc
           const fullName = session.activeDocPath

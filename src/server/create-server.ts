@@ -74,7 +74,9 @@ export async function createServer(options: CreateServerOptions): Promise<void> 
   const cleanup = async () => {
     log.info("Shutting down...")
     if (heartbeat) clearInterval(heartbeat)
-    try { await appManager.quit() } catch { /* ignore */ }
+    // Detach only: quitting Word here would discard the user's unsaved work
+    // every time the MCP client reconnects or the child process restarts.
+    try { appManager.release() } catch { /* ignore */ }
     process.exit(0)
   }
   process.on("SIGINT", cleanup)
