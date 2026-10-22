@@ -45,10 +45,12 @@ export function runWithTraceId<T>(traceId: string, fn: () => T): T {
 }
 
 export function createRootLogger(): ILogger {
-  const raw = pino({
-    name: "word-mcp",
-    level: process.env.LOG_LEVEL ?? "info",
-  })
+  // stdout carries the MCP JSON-RPC stream. Logging there corrupts the
+  // protocol, so every log line is written to stderr instead.
+  const raw = pino(
+    { name: "word-mcp", level: process.env.LOG_LEVEL ?? "info" },
+    pino.destination(2),
+  )
   return alsAware(raw)
 }
 

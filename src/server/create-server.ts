@@ -46,8 +46,23 @@ export async function createServer(options: CreateServerOptions): Promise<void> 
 
   log.info("Starting Word MCP Server...")
 
+  // The parent watchdog restarts a child that stays silent. A debug log is
+  // filtered out at the default "info" level, so send an explicit IPC
+  // heartbeat that cannot be suppressed and does not touch stdout/stderr.
   const heartbeat = options.enableHeartbeat
-    ? setInterval(() => { log.debug("heartbeat alive") }, 10_000)
+    ? setInterval(() => {
+        try {
+          if (process.send) {
+            process.send({ type: "heartbeat", ts: Date.now() })
+          } else {
+            // Older parent versions do not open an IPC channel; keep the
+            // watchdog fed through stderr instead (never stdout).
+            process.stderr.write("[word-mcp] heartbeat\n")
+          }
+        } catch {
+          // Parent already gone — nothing to do.
+        }
+      }, 5_000)
     : null
 
   const sessionLogger = createModuleLogger(rootLogger, "session")
