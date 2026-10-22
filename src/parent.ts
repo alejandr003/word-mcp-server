@@ -11,10 +11,11 @@ const CHILD_SCRIPT = resolve(__dirname, "child.js")
 const WATCHDOG_TIMEOUT_MS = parseInt(process.env.WATCHDOG_TIMEOUT_MS ?? "30000", 10)
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS ?? "5000", 10)
 
-const logger = pino({
-  name: "word-mcp/parent",
-  level: process.env.LOG_LEVEL ?? "info",
-})
+// stdout is the MCP transport — logs must go to stderr.
+const logger = pino(
+  { name: "word-mcp/parent", level: process.env.LOG_LEVEL ?? "info" },
+  pino.destination(2),
+)
 
 class Watchdog {
   private child: ReturnType<typeof spawn> | null = null
@@ -39,7 +40,8 @@ class Watchdog {
 
     this.lastChildOutput = Date.now()
     this.child = spawn("node", [CHILD_SCRIPT], {
-      stdio: ["pipe", "pipe", "pipe"],
+      // Dedicated IPC channel for heartbeats. STDIO stays untouched for MCP.
+      stdio: ["pipe", "pipe", "pipe", "ipc"],
       windowsHide: false,
       env: { ...process.env, CHILD_TRACE_ID: childTraceId },
     })
@@ -78,6 +80,11 @@ class Watchdog {
         logger.warn("Restarting child after unexpected exit...")
         this.spawnChild()
       }
+    })
+
+    // Heartbeats are sent over IPC so they do not pollute the MCP stdio stream.
+    child.on("message", () => {
+      this.lastChildOutput = Date.now()
     })
 
     child.on("error", (err) => {
