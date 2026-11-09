@@ -1,5 +1,3 @@
-> [English](./TOOLS.md) | [中文](./TOOLS.zh-CN.md)
-
 # Word MCP Server — Tool Reference
 
 > 81 tools across 13 modules.

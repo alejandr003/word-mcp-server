@@ -18,9 +18,7 @@
   "files": [
     "build/",
     "README.md",
-    "README.zh-CN.md",
     "TOOLS.md",
-    "TOOLS.zh-CN.md",
     "LICENSE"
   ],
   "engines": {

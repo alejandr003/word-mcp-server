@@ -1,4 +1,4 @@
-# Word MCP Server — 开发者速查
+# Word MCP Server — Developer Quick Reference
 
 ## Build & test
 ```bash
@@ -41,4 +41,4 @@ All proxy methods wrap COM calls with try-catch + safe defaults. No bare COM acc
 
 ## Config
 - `.env.example` → copy to `.env`: ALLOWED_DIRECTORIES, MAX_FILE_SIZE, RATE_LIMIT_*, etc.
-- No CI config in this repo (`.github/` absent).
+- CI: `.github/workflows/ci.yml` (type-check and unit tests on Ubuntu).
