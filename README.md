@@ -1,12 +1,14 @@
 # Word MCP Server
 
 <p align="center">
-  <a href="https://github.com/alejandr003/word-mcp-server/blob/main/assets/demo/demo.mp4">
-    <strong>Watch the demo video</strong>
-  </a>
+  <video src="https://github.com/user-attachments/assets/0f8d144b-62bd-4ee7-9c01-c0f71cca05b6" autoplay loop muted playsinline width="300"></video>
 </p>
 
-> The demo is stored in this repository at `assets/demo/demo.mp4`. GitHub does not play repository-hosted MP4 files inline; open the link above to watch or download it.
+<p align="center">
+  <a href="https://github.com/alejandr003/word-mcp-server/blob/main/assets/demo/demo.mp4">Open the MP4 from this repository</a>
+</p>
+
+> The preview above is hosted as a GitHub attachment. The source file is also available at `assets/demo/demo.mp4` in this repository.
 
 <p align="center">
   <a href="https://opensource.org/licenses/MIT">
